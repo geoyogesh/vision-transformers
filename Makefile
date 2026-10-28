@@ -1,4 +1,4 @@
-.PHONY: help setup hooks test lint format train bench samples notebook clean
+.PHONY: help setup hooks test lint format train bench samples diagram notebook clean
 
 CHECKPOINT ?= checkpoints/vit_mnist.pt
 TRAIN_ARGS ?=
@@ -13,6 +13,7 @@ help:
 	@echo "train     train and export $(CHECKPOINT)  [TRAIN_ARGS=...]"
 	@echo "bench     accuracy + latency benchmark -> results/bench.json  [BENCH_ARGS=...]"
 	@echo "samples   write 10 MNIST test digits to samples/"
+	@echo "diagram   render docs/architecture.png (needs: brew install graphviz)"
 	@echo "notebook  start Jupyter Lab"
 	@echo "clean     remove caches"
 
@@ -41,6 +42,9 @@ bench:
 
 samples:
 	uv run vit-infer --dump-samples samples
+
+diagram:
+	uv run python scripts/render_architecture.py
 
 notebook:
 	uv run jupyter lab notebooks/
