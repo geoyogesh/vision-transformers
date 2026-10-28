@@ -4,6 +4,7 @@ Usage:
     vit-infer                                     # accuracy + benchmark on the auto device
     vit-infer --device cpu --device mps           # compare devices
     vit-infer --out results/bench.json            # also write results as JSON
+    vit-infer --confusion-png docs/confusion_matrix.png   # save confusion-matrix heatmap
     vit-infer --dump-samples samples              # write 10 MNIST test digits as PNGs
     vit-infer --image samples/*.png               # predict image files (white digit on black)
     vit-infer --image photo.png --invert          # dark digit on light background
@@ -33,17 +34,117 @@ def sync(device: torch.device) -> None:
 
 
 @torch.inference_mode()
-def accuracy(model, loader, device) -> tuple[float, float]:
-    """Return (accuracy %, wall seconds incl. data loading)."""
-    correct = total = 0
+def evaluate(model, loader, device, num_classes: int = 10) -> tuple[float, float, torch.Tensor]:
+    """Return (accuracy %, wall seconds incl. data loading, confusion matrix [true, pred])."""
+    all_preds, all_labels = [], []
     sync(device)
     t0 = time.perf_counter()
     for images, labels in loader:
-        preds = model(images.to(device)).argmax(1).cpu()
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
+        all_preds.append(model(images.to(device)).argmax(1).cpu())
+        all_labels.append(labels)
     sync(device)
-    return 100.0 * correct / total, time.perf_counter() - t0
+    secs = time.perf_counter() - t0
+    preds, labels = torch.cat(all_preds), torch.cat(all_labels)
+    acc = 100.0 * (preds == labels).float().mean().item()
+    return acc, secs, confusion_matrix(preds, labels, num_classes)
+
+
+def confusion_matrix(preds: torch.Tensor, labels: torch.Tensor, num_classes: int) -> torch.Tensor:
+    """counts[i, j] = number of samples with true class i predicted as class j."""
+    idx = labels.long() * num_classes + preds.long()
+    return torch.bincount(idx, minlength=num_classes**2).reshape(num_classes, num_classes)
+
+
+def per_class_metrics(cm: torch.Tensor) -> list[dict]:
+    """Precision, recall and F1 (in %) per class from a confusion matrix."""
+    cm = cm.double()
+    tp = cm.diag()
+    support = cm.sum(1)  # true count per class
+    predicted = cm.sum(0)  # predicted count per class
+    precision = torch.where(predicted > 0, tp / predicted, torch.zeros_like(tp))
+    recall = torch.where(support > 0, tp / support, torch.zeros_like(tp))
+    denom = precision + recall
+    f1 = torch.where(denom > 0, 2 * precision * recall / denom, torch.zeros_like(tp))
+    return [
+        {
+            "class": c,
+            "precision": 100 * precision[c].item(),
+            "recall": 100 * recall[c].item(),
+            "f1": 100 * f1[c].item(),
+            "support": int(support[c].item()),
+        }
+        for c in range(cm.size(0))
+    ]
+
+
+def top_confusions(cm: torch.Tensor, k: int = 5) -> list[dict]:
+    """The k most frequent (true -> predicted) mistakes."""
+    off = cm.clone()
+    off.fill_diagonal_(0)
+    counts, flat = off.flatten().topk(k)
+    n = cm.size(0)
+    return [
+        {"true": int(i // n), "pred": int(i % n), "count": int(c)}
+        for c, i in zip(counts.tolist(), flat.tolist(), strict=True)
+        if c > 0
+    ]
+
+
+def print_confusion(cm: torch.Tensor) -> None:
+    n = cm.size(0)
+    print("confusion matrix (rows = true, cols = predicted):")
+    print("true\\pred " + "".join(f"{j:>6}" for j in range(n)))
+    for i in range(n):
+        print(f"{i:>9} " + "".join(f"{cm[i, j].item():>6}" for j in range(n)))
+    print(f"{'class':>6} {'precision':>10} {'recall':>8} {'f1':>7} {'support':>8}")
+    for m in per_class_metrics(cm):
+        print(
+            f"{m['class']:>6} {m['precision']:>9.2f}% {m['recall']:>7.2f}% "
+            f"{m['f1']:>6.2f}% {m['support']:>8}"
+        )
+    worst = ", ".join(f"{c['true']}->{c['pred']} ({c['count']})" for c in top_confusions(cm))
+    print(f"top confusions (true->pred): {worst}")
+
+
+def save_confusion_png(cm: torch.Tensor, path: str, title: str) -> None:
+    """Heatmap of row-normalized recall (%) annotated with raw counts."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        sys.exit("--confusion-png needs matplotlib: uv sync (notebook group)")
+
+    n = cm.size(0)
+    rates = (100 * cm.double() / cm.sum(1, keepdim=True).clamp(min=1)).numpy()
+    counts = cm.numpy()
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(rates, cmap="Blues", vmin=0, vmax=100)
+    for i in range(n):
+        for j in range(n):
+            count = int(counts[i, j])
+            if count:
+                ax.text(
+                    j,
+                    i,
+                    str(count),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="white" if rates[i, j] > 50 else "black",
+                )
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax, label="% of true class")
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    print(f"wrote {path}")
 
 
 @torch.inference_mode()
@@ -110,6 +211,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--iters", type=int, default=200)
     ap.add_argument("--data", default=data.DEFAULT_DATA_DIR)
     ap.add_argument("--out", help="write benchmark results to this JSON file")
+    ap.add_argument(
+        "--confusion-png", metavar="PATH", help="save a confusion-matrix heatmap (first device)"
+    )
     ap.add_argument("--image", nargs="+", help="predict one or more image files and exit")
     ap.add_argument("--invert", action="store_true", help="invert --image (dark digit on light bg)")
     ap.add_argument(
@@ -162,10 +266,13 @@ def main(argv: list[str] | None = None) -> None:
         if ckpt.get("git_sha"):
             print(f"checkpoint: git {ckpt['git_sha']}, created {ckpt.get('created_at')}")
 
-        acc, secs = accuracy(model, loader, device)
+        acc, secs, cm = evaluate(model, loader, device, model.cfg.num_classes)
         print(
             f"test accuracy: {acc:.2f}%  ({len(testset)} images in {secs:.2f}s, incl. data loading)"
         )
+        print_confusion(cm)
+        if args.confusion_png and device == devices[0]:
+            save_confusion_png(cm, args.confusion_png, f"MNIST test set, accuracy {acc:.2f}%")
 
         rows = [
             summarize(latency(model, sample[:bs], device, iters=args.iters), bs)
@@ -182,6 +289,9 @@ def main(argv: list[str] | None = None) -> None:
                 "device": str(device),
                 "params": n_params,
                 "test_accuracy": acc,
+                "confusion_matrix": cm.tolist(),
+                "per_class": per_class_metrics(cm),
+                "top_confusions": top_confusions(cm),
                 "checkpoint_git_sha": ckpt.get("git_sha"),
                 "latency": rows,
             }

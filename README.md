@@ -90,6 +90,7 @@ notebooks/
 tests/                    model, inference CLI, notebook/package parity
 scripts/                  pre-commit helper + architecture diagram renderer
 docs/architecture.png     layer graph (make diagram)
+docs/confusion_matrix.png confusion matrix heatmap (make bench)
 results/bench.json        latest benchmark (committed)
 checkpoints/ data/ samples/   generated, gitignored
 ```
@@ -108,7 +109,7 @@ make format               # auto-fix
 make notebook             # jupyter lab notebooks/
 make train                # -> checkpoints/vit_mnist.pt
 make train TRAIN_ARGS="--epochs 10 --lr 1e-3" CHECKPOINT=checkpoints/run2.pt
-make bench                # cpu + mps benchmark -> results/bench.json
+make bench                # cpu + mps accuracy, confusion matrix, latency -> results/bench.json
 make samples              # 10 MNIST test digits -> samples/
 make diagram              # docs/architecture.png
 ```
@@ -134,7 +135,7 @@ so use `--invert` for dark-on-light images. MNIST downloads to `./data` on first
 
 ## Test results
 
-`make test`: 16 passed in ~5.5s (CPU only, no dataset download).
+`make test`: 23 passed in ~5s (CPU only, no dataset download).
 
 | Test | What it checks | Result |
 |---|---|---|
@@ -152,6 +153,13 @@ so use `--invert` for dark-on-light images. MNIST downloads to `./data` on first
 | `test_entry_point_installed` | `python -m vit.infer --help` works | Pass |
 | `test_notebook_hyperparameters_match_config` | Notebook globals equal `ViTConfig` defaults | Pass |
 | `test_notebook_weights_load_into_package_model` | Notebook model weights load into the package model with identical outputs | Pass |
+| `test_confusion_matrix_counts` | Hand-checked 3-class matrix; diagonal sum equals correct predictions | Pass |
+| `test_confusion_matrix_includes_unseen_classes` | Always 10x10 even if some classes never appear | Pass |
+| `test_per_class_metrics` | Precision / recall / F1 against hand-computed values | Pass |
+| `test_per_class_metrics_handles_empty_class` | No division by zero for classes with no samples | Pass |
+| `test_top_confusions_ignores_correct_predictions` | Ranks off-diagonal mistakes only | Pass |
+| `test_save_confusion_png` | Heatmap is written as a valid PNG | Pass |
+| `test_evaluate_matrix_agrees_with_accuracy` | `evaluate()` matrix rows match label counts and its diagonal matches accuracy | Pass |
 
 ## Performance
 
@@ -177,13 +185,43 @@ Full test set: ~0.33s on CPU, ~0.28s on MPS, including data loading.
 
 | Batch | CPU p50 | CPU p95 | CPU img/s | MPS p50 | MPS p95 | MPS img/s |
 |---|---|---|---|---|---|---|
-| 1 | 0.13 ms | 0.15 ms | ~7.6k | 0.50 ms | 0.59 ms | ~2.0k |
-| 64 | 1.37 ms | 1.48 ms | ~47k | 0.55 ms | 0.58 ms | ~116k |
-| 256 | 4.97 ms | 5.20 ms | ~52k | 0.48 ms | 0.53 ms | ~528k |
-| 1024 | 19.1 ms | 19.6 ms | ~53k | 0.89 ms | 0.92 ms | ~1.15M |
+| 1 | 0.13 ms | 0.14 ms | ~7.6k | 0.50 ms | 0.64 ms | ~2.0k |
+| 64 | 1.40 ms | 1.47 ms | ~46k | 0.53 ms | 0.59 ms | ~121k |
+| 256 | 5.15 ms | 6.33 ms | ~50k | 0.47 ms | 0.66 ms | ~539k |
+| 1024 | 19.6 ms | 20.7 ms | ~52k | 0.87 ms | 1.14 ms | ~1.17M |
 
 - Single-image latency: CPU wins (~4x), since MPS dispatch overhead dominates a model this small.
 - Batched throughput: MPS wins (~22x at batch 1024); CPU saturates around ~50k img/s.
+
+### Confusion matrix
+
+`make bench` also computes the confusion matrix on the 10,000 test images (identical on CPU and
+MPS) and saves `docs/confusion_matrix.png`. Cell color = % of the true class, numbers = counts.
+
+<img src="docs/confusion_matrix.png" alt="Confusion matrix on the MNIST test set" width="560">
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| 0 | 89.68% | 94.90% | 92.22% | 980 |
+| 1 | 96.89% | 96.21% | 96.55% | 1135 |
+| 2 | 94.62% | 81.88% | 87.79% | 1032 |
+| 3 | 87.55% | 87.03% | 87.29% | 1010 |
+| 4 | 70.53% | 94.81% | 80.89% | 982 |
+| 5 | 86.48% | 83.18% | 84.80% | 892 |
+| 6 | 83.03% | 91.44% | 87.03% | 958 |
+| 7 | 88.52% | 91.54% | 90.00% | 1028 |
+| 8 | 82.83% | 82.24% | 82.53% | 974 |
+| 9 | 90.98% | 60.95% | 73.00% | 1009 |
+
+Top confusions (true to predicted): 9 to 4 (269), 9 to 7 (61), 2 to 6 (55), 5 to 3 (52),
+8 to 6 (50).
+
+- **9 to 4 dominates**: 269 of 1,348 errors (20%). It is why class 9 has the lowest recall
+  (61%) and class 4 the lowest precision (71%). With 7x7 patches and a single attention layer,
+  the model struggles to tell a closed loop (9) from an open top (4).
+- 1 and 0 are the easiest classes (F1 over 92%); 9, 4 and 8 the hardest.
+- The confusion matrix, per-class metrics and top confusions are also stored per device in
+  `results/bench.json`.
 
 ## Known limitations
 

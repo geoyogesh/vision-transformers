@@ -11,7 +11,7 @@ help:
 	@echo "lint      ruff check + format check"
 	@echo "format    auto-fix lint and format code"
 	@echo "train     train and export $(CHECKPOINT)  [TRAIN_ARGS=...]"
-	@echo "bench     accuracy + latency benchmark -> results/bench.json  [BENCH_ARGS=...]"
+	@echo "bench     accuracy, confusion matrix + latency -> results/bench.json, docs/confusion_matrix.png"
 	@echo "samples   write 10 MNIST test digits to samples/"
 	@echo "diagram   render docs/architecture.png (needs: brew install graphviz)"
 	@echo "notebook  start Jupyter Lab"
@@ -38,7 +38,8 @@ train:
 	uv run vit-train --out $(CHECKPOINT) $(TRAIN_ARGS)
 
 bench:
-	uv run vit-infer --checkpoint $(CHECKPOINT) --out results/bench.json $(BENCH_ARGS)
+	uv run vit-infer --checkpoint $(CHECKPOINT) --out results/bench.json \
+		--confusion-png docs/confusion_matrix.png $(BENCH_ARGS)
 
 samples:
 	uv run vit-infer --dump-samples samples
