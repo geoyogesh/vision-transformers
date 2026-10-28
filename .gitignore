@@ -1,1 +1,22 @@
+# Datasets and generated artifacts
 data/
+checkpoints/
+samples/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build / tooling caches
+build/
+
+# macOS
+.DS_Store
